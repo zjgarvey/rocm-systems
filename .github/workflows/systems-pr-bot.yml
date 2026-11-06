@@ -76,6 +76,36 @@ jobs:
       - name: Install deps
         run: python -m pip install --upgrade pip requests pyyaml
 
+      - name: Resolve the App comment author
+        id: comment-author
+        if: steps.app-secrets.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          python - <<'PYTHON'
+          import os
+          from urllib.parse import quote
+          import requests
+
+          login = f"{os.environ['APP_SLUG']}[bot]"
+          response = requests.get(
+              "https://api.github.com/users/" + quote(login, safe=""),
+              headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                       "Accept": "application/vnd.github+json"},
+              timeout=30,
+          )
+          response.raise_for_status()
+          actor = response.json()
+          if actor.get("login") != login or actor.get("type") != "Bot":
+              raise RuntimeError("GitHub App comment identity does not match")
+          actor_id = actor.get("id")
+          if type(actor_id) is not int or actor_id <= 0:
+              raise RuntimeError("GitHub App comment identity has no valid id")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"id={actor_id}\n")
+          PYTHON
+
       - name: Enforce policy
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
@@ -83,6 +113,7 @@ jobs:
           ACTIONS_TOKEN: ${{ github.token }}
           HAS_GITHUB_APP_TOKEN: ${{ steps.app-secrets.outputs.available }}
           POST_COMMENTS: ${{ steps.app-secrets.outputs.available }}
+          COMMENT_AUTHOR_ID: ${{ steps.comment-author.outputs.id }}
           MUTATE_PR: ${{ steps.app-secrets.outputs.available }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}

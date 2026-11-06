@@ -464,6 +464,81 @@ class SkipTagTests(unittest.TestCase):
 # ----------------------------- required checks ------------------------------
 
 
+class CommentOwnershipTests(unittest.TestCase):
+    def comment(self, author_id: int, kind: str = "Bot") -> Dict[str, Any]:
+        return {
+            "user": {"id": author_id, "type": kind},
+            "body": "<!-- policy -->",
+            "url": f"https://api.github.com/comments/{author_id}",
+        }
+
+    def test_human_and_other_app_markers_cannot_claim_the_owned_comment(self) -> None:
+        for helper in (pc.upsert_comment, pc.update_comment_if_exists):
+            with self.subTest(helper=helper.__name__), mock.patch.dict(
+                os.environ, {"COMMENT_AUTHOR_ID": "42"}
+            ), mock.patch.object(pc, "CAN_POST_COMMENTS", True), mock.patch.object(
+                pc,
+                "gh_get",
+                return_value=[
+                    self.comment(1, "User"),
+                    self.comment(2),
+                    self.comment(42),
+                ],
+            ) as get, mock.patch.object(
+                pc, "gh_patch"
+            ) as patch, mock.patch.object(
+                pc, "gh_post"
+            ) as post:
+                helper("owner", "repo", 7, "token", "<!-- policy -->", "updated")
+                patch.assert_called_once_with(
+                    "https://api.github.com/comments/42", "token", {"body": "updated"}
+                )
+                post.assert_not_called()
+
+    def test_owned_comment_on_second_page_is_edited_without_duplication(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"COMMENT_AUTHOR_ID": "42"}
+        ), mock.patch.object(pc, "CAN_POST_COMMENTS", True), mock.patch.object(
+            pc,
+            "gh_get",
+            side_effect=[[self.comment(1, "User")] * 100, [self.comment(42)]],
+        ) as get, mock.patch.object(
+            pc, "gh_patch"
+        ) as patch, mock.patch.object(
+            pc, "gh_post"
+        ) as post:
+            pc.upsert_comment("owner", "repo", 7, "token", "<!-- policy -->", "updated")
+            self.assertEqual(get.call_count, 2)
+            self.assertIn("page=2", get.call_args.args[0])
+            patch.assert_called_once()
+            post.assert_not_called()
+
+    def test_incomplete_listing_and_write_errors_are_not_reported_as_success(
+        self,
+    ) -> None:
+        for responses in (
+            [
+                [],
+            ],
+            [[self.comment(1, "User")] * 100, RuntimeError("page two unavailable")],
+        ):
+            with self.subTest(responses=len(responses)), mock.patch.dict(
+                os.environ, {"COMMENT_AUTHOR_ID": "42"}
+            ), mock.patch.object(pc, "CAN_POST_COMMENTS", True), mock.patch.object(
+                pc, "gh_get", side_effect=responses
+            ), mock.patch.object(
+                pc, "gh_patch"
+            ), mock.patch.object(
+                pc, "gh_post", side_effect=RuntimeError("write unavailable")
+            ) as post:
+                with self.assertRaises(RuntimeError):
+                    pc.upsert_comment(
+                        "owner", "repo", 7, "token", "<!-- policy -->", "updated"
+                    )
+                if len(responses) == 2:
+                    post.assert_not_called()
+
+
 class RequiredCheckRunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.policy = make_policy()
@@ -877,6 +952,7 @@ class RequiredCheckPollingTests(unittest.TestCase):
                 "BASE_REF": branch,
                 "BASE_SHA": "base-sha",
                 "ACTIONS_TOKEN": "actions-token",
+                "COMMENT_AUTHOR_ID": "42",
             },
             clear=True,
         ), mock.patch.object(pc, "gh_get", side_effect=get), mock.patch.object(

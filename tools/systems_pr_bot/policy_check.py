@@ -853,70 +853,64 @@ def _required_check_status(
     return True, False, None
 
 
+def find_owned_comment(
+    owner: str, repo: str, pr_number: int, token: str, marker: str
+) -> Optional[Dict[str, Any]]:
+    """Find a marker only among comments owned by the authenticated App actor."""
+    author_id = int(os.environ["COMMENT_AUTHOR_ID"])
+    if author_id <= 0:
+        raise ValueError("COMMENT_AUTHOR_ID must be a positive GitHub user id")
+    page = 1
+    while True:
+        comments = gh_get(
+            f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
+            f"?per_page=100&page={page}",
+            token,
+        )
+        if not isinstance(comments, list) or any(
+            not isinstance(comment, dict) for comment in comments
+        ):
+            raise RuntimeError("Unexpected issue-comments payload")
+        for comment in comments:
+            author = comment.get("user") or {}
+            if (
+                author.get("id") == author_id
+                and author.get("type") == "Bot"
+                and marker in str(comment.get("body", ""))
+            ):
+                return comment
+        if len(comments) < 100:
+            return None
+        page += 1
+
+
 def upsert_comment(
     owner: str, repo: str, pr_number: int, token: str, marker: str, body: str
 ) -> None:
-    """Create or update a single marker-tagged bot comment on the PR.
-
-    Looks for an existing comment whose body contains `marker`; if found it is
-    PATCHed in place, otherwise a new comment is POSTed. This keeps the bot to
-    one self-updating comment per marker instead of spamming new ones.
-    """
+    """Update an App-owned marker comment, or create it after a complete lookup."""
     if not CAN_POST_COMMENTS:
         print("ℹ️  Skipping PR comment — no write access (e.g. fork PR).")
         return
-    try:
-        comments = gh_get(
-            f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments?per_page=100",
-            token,
-        )
-        if isinstance(comments, list):
-            for c in comments:
-                if isinstance(c, dict) and marker in str(c.get("body", "")):
-                    gh_patch(c["url"], token, {"body": body})
-                    return
+    comment = find_owned_comment(owner, repo, pr_number, token, marker)
+    if comment is not None:
+        gh_patch(comment["url"], token, {"body": body})
+    else:
         gh_post(
             f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments",
             token,
             {"body": body},
         )
-    except RuntimeError as exc:
-        print(f"⚠️  Could not post/update comment (continuing): {exc}", file=sys.stderr)
 
 
 def update_comment_if_exists(
     owner: str, repo: str, pr_number: int, token: str, marker: str, body: str
 ) -> None:
-    """Edit an EXISTING bot comment in place — never create or delete.
-
-    Finds the comment whose body contains the given bot `marker` and PATCHes it
-    to `body`. If no such comment exists, this does nothing.
-
-    We deliberately do NOT delete comments: bot code must never risk removing a
-    developer's comment. Only comments authored by THIS bot (identified by an
-    HTML marker) are ever touched, and only via an in-place edit.
-    """
+    """Edit an App-owned marker comment without creating or deleting comments."""
     if not CAN_POST_COMMENTS:
         return
-    try:
-        comments = gh_get(
-            f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments?per_page=100",
-            token,
-        )
-    except RuntimeError as exc:
-        print(f"⚠️  Could not list comments (continuing): {exc}", file=sys.stderr)
-        return
-    if isinstance(comments, list):
-        for c in comments:
-            if isinstance(c, dict) and marker in str(c.get("body", "")):
-                try:
-                    gh_patch(c["url"], token, {"body": body})
-                except RuntimeError as exc:
-                    print(
-                        f"⚠️  Could not update comment (continuing): {exc}",
-                        file=sys.stderr,
-                    )
-                return
+    comment = find_owned_comment(owner, repo, pr_number, token, marker)
+    if comment is not None:
+        gh_patch(comment["url"], token, {"body": body})
 
 
 def build_policy_table_comment(

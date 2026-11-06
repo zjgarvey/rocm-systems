@@ -321,6 +321,13 @@ CodeQL is enforced by its own workflows; it is included in this table only if
 its check name is declared in `checks.required_check_runs`. The bot does not
 query code-scanning alerts.
 
+The bot updates only comments whose numeric author identity matches its
+GitHub App account. The trusted workflow resolves that account from the
+configured App and supplies `COMMENT_AUTHOR_ID`; read-only direct runs set
+`POST_COMMENTS=false`. Marker text in a human comment cannot claim ownership.
+Comment lookup includes every page; lookup or publication errors fail the
+policy invocation rather than silently leaving an old table in place.
+
 **The bot timed out — what do I do?**
 
 The bot times out after 15 minutes if an expected check is missing or still
